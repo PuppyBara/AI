@@ -1,17 +1,19 @@
 import uvicorn
 from fastapi import FastAPI, UploadFile, Request, status, File
-from fastapi.responses import JSONResponse, FileResponse
 import os
-import uuid
 from pathlib import Path
 import sys
 import platform
-import json
 import os
 import dotenv
 import boto3
 import PIL.Image as Image
 from pydantic import BaseModel
+from crop import run
+from ultralytics import YOLO
+from ultralytics.engine.results import Results
+model = YOLO("./runs/detect/train2/weights/best.pt")
+
 # Pydantic 모델 정의
 class Info(BaseModel):
     lostDogInfo: dict
@@ -43,37 +45,15 @@ s3 = boto3.resource('s3',
                     region_name=AWS_REGION_NAME)
 BUCKET = s3.Bucket(AWS_BUCKET_NAME)
 
+
 def s3_load_image(img_url):
   return BUCKET.Object(img_url).get()['Body']
 
-# S3에 저장된 이미지 파일명이 img.png일 때
-# img = s3_load_image('img.png')
-# img = Image.open(img)
-# img.show()
-
-# from starlette.middleware.cors import CORSMiddleware
-
-# origins = [
-#     "https://j10b102.p.ssafy.io",
-#     "http://localhost:8000",
-#     "http://0.0.0.0:8000",
-#     "http://0.0.0.0",
-# ]
-
-# app.add_middleware(
-#     CORSMiddleware,
-#     allow_origins=origins,
-#     allow_credentials=True,
-#     allow_methods=["*"],
-#     allow_headers=["*"],
-# )
 
 @app.post("/ai/analyse")
-def test(find_info: Info):
+def analyse(find_info: Info):
     # S3에 저장된 이미지 파일명이 img.png일 때
     # find_info = Request.body["find_info"]
-    print("!")
-    print(find_info)
     lost_dog = find_info.lostDogInfo
     dog_candidates = find_info.images
 
@@ -81,57 +61,37 @@ def test(find_info: Info):
     lost_img = Image.open(lost_img)
     # lost_img.show()
     candidate_images = [Image.open(s3_load_image(dog["s3Url"])) for dog in dog_candidates]
-
-    return "test"
-
-
-# @app.post("/python/upload")
-# async def upload_file(image: UploadFile = File(...)):
-#     extension = os.path.splitext(image.filename)[1]
-#     unique_name = f"{uuid.uuid4()}{extension}"
-
-#     upload_path = "uploads"
-#     if not os.path.exists(upload_path):
-#         os.makedirs(upload_path)
-#     file_path = os.path.join(upload_path, unique_name)
-#     with open(file_path, "wb") as buffer:
-#         buffer.write(image.file.read())
     
-#     option = {
-#         "weights":ROOT / './best.pt',
-#         "source" : file_path,
-#         "data": ROOT/'data/custom.yaml',
-#         "imgsz" : [640,640],
-#         "device" : "cpu"
-#     }
+    lost_pred = model(lost_img)
+    pred = model(candidate_images)
+
+    for idx, temp in enumerate(pred):
+
+        cropped_image = crop_nose(candidate_images[idx], temp)
+
+        if temp.boxes.conf > 0.7:
+            # 개 코 인지 되면 비문 인식 AI 적용
+            nose_detection(cropped_image)
+        else:
+            # 개 코 인지 안됐으므로 안면 인식 AI 적용
+            face_detection(cropped_image)
+
+    return "test" 
 
 
-#     # option = {
-#     #     "weights":ROOT / './trained_model/2515_2659_2066_1224_2558_109.pt',
-#     #     "source" : "https://yoyak.s3.ap-northeast-2.amazonaws.com/1.jpg",
-#     #     "data": ROOT/'data/custom.yaml',
-#     #     "imgsz" : [640,640],
-#     #     "device" : "cpu"
-#     # }
-#     print("option", option)
-#     names = run(**option)
+def crop_nose(image: Image, result: Results):
+    # 자를 좌표 (left, upper, right, lower)
 
-#     medicineList = []
-#     for name in names:
-#         data = {}
-#         splited = name.split("-")
-#         data["medicineCode"] = splited[0]
-#         data["medicineName"] = splited[1]
-#         medicineList.append(data)
-
-    
+    crop_box = tuple(result.boxes.xyxy[0].T.tolist())
+    # 이미지 자르기
+    return image.crop(crop_box)
 
 
-#     return {
-#         "count": len(names),
-#         "medicineList": medicineList
-#     }
+def nose_detection(image):
+    print(f"nose detection call - {type(image)}")
 
+def face_detection(image):
+    print(f"face detection call - {type(image)}")
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
