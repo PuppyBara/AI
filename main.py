@@ -9,7 +9,6 @@ import dotenv
 import boto3
 import PIL.Image as Image
 from pydantic import BaseModel
-from crop import run
 from ultralytics import YOLO
 from ultralytics.engine.results import Results
 model = YOLO("./runs/detect/train2/weights/best.pt")
