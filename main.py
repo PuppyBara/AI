@@ -30,6 +30,8 @@ from io import BytesIO
 model = YOLO("./runs/detect/train2/weights/best.pt")
 
 # 비문 인식 모델 로드
+# model_nose = tf.keras.models.load_model('./Nose/original.h5')
+# model_nose = tf.keras.models.load_model('./Nose/saved_model')
 model_nose = tf.saved_model.load('./Nose/saved_model')
 print("비문 인식 로드 완료")
 
@@ -90,15 +92,17 @@ def analyse(find_info: Info):
     lost_dog = find_info.lostDogInfo
     dog_candidates = find_info.images
     upper_bound = find_info.upperBound
+    print(upper_bound)
 
     lost_img = s3_load_image(lost_dog["s3Url"])
-    # lost_img = Image.open(lost_img)
-    lost_img = np.array(Image.open(lost_img).convert('RGB'))
+    lost_img = Image.open(lost_img).convert('RGB')
     
     # lost_img.show()
     # candidate_images = [Image.open(s3_load_image(dog["s3Url"])) for dog in dog_candidates]
     # candidate_images = [(dog['dogId'], Image.open(s3_load_image(dog['s3Url']))) for dog in dog_candidates]
-    candidate_images = [(dog['dogId'], np.array(Image.open(s3_load_image(dog['s3Url'])).convert('RGB'))) for dog in dog_candidates]
+    # candidate_images = [(dog['dogId'], np.array(Image.open(s3_load_image(dog['s3Url'])).convert('RGB'))) for dog in dog_candidates]
+    candidate_images = [(dog['dogId'], Image.open(s3_load_image(dog['s3Url']))) for dog in dog_candidates]
+    candidate_images_copy = [(dog['dogId'], np.array(Image.open(s3_load_image(dog['s3Url'])).convert('RGB'))) for dog in dog_candidates]
     
     ai_results = []
     
@@ -111,17 +115,21 @@ def analyse(find_info: Info):
         dog_id = dog_candidates[idx]['dogId']
         detection_result = None
         # cropped_image = crop_nose(candidate_images[idx][1], temp)
-        # if temp.boxes.conf > 0.7:
-        if temp.boxes and len(temp.boxes.conf) > 0 and temp.boxes.conf[0] > 0.7:
+    
+        if temp.boxes and len(temp.boxes.conf) > 0 and temp.boxes.conf[0] > 0.3:
+            print(temp.boxes.conf[0])
             # 개 코 인지 되면 비문 인식 AI 적용
             # nose_detection(cropped_image)
+            print("nose_detection 들어옴")
             cropped_image = crop_nose(candidate_images[idx][1], temp)
             detection_result = nose_detection(lost_img, cropped_image, upper_bound)
+            print("detection_result: ",detection_result)
             detection_type = "Nose"
         else:
             # 개 코 인지 안됐으므로 안면 인식 AI 적용
             # face_detection(cropped_image)
-            detection_results = face_detection(lost_img, candidate_images[idx], upper_bound)
+            lost_img_copy = np.array(lost_img)
+            detection_results = face_detection(lost_img_copy, candidate_images_copy[idx], upper_bound)
             for result in detection_results:
                 ai_results.append({
                     "dogId": result[0],
@@ -148,7 +156,7 @@ def preprocess_image(image: Image.Image):
     # 이미지 흑백 변환 및 크기 조정
     image = np.array(image.convert('L').resize((96, 96)))
     image = image.astype(np.float32) / 255.0
-    image = image.reshape((1, 96, 96, 1))
+    # image = image.reshape((1, 96, 96, 1))
     
     # 이미지 증강
     seq = iaa.Sequential([
@@ -163,39 +171,39 @@ def preprocess_image(image: Image.Image):
     ], random_order=True)
     
     # 증강된 이미지 반환
-    augmented_image = seq.augment_image(image)
+    augmented_image = seq.augment_image(image.reshape((96, 96, 1)))
     return augmented_image.reshape((1, 96, 96, 1))
 
 def nose_detection(lost_img, cropped_img, upper_bound):
     preprocessed_lost_img = preprocess_image(lost_img)
     preprocessed_candidate_img = preprocess_image(cropped_img)
     
-    pred = model_nose.predict([preprocessed_lost_img, preprocessed_candidate_img])
-    pred_confidence = pred[0][0]*100
+    inputs = [preprocessed_lost_img, preprocessed_candidate_img]
+    
+    pred = model_nose(inputs)
+    pred_confidence = pred[0][0].numpy() * 100
     
     if pred_confidence >= upper_bound:
         return pred_confidence
     return None
 
 def face_detection(lost_img, candidate_images, upper_bound):
-    known_face_encodings.clear()
-    known_face_names.clear()
     results = []
 
     add_known_face(candidate_images[1], str(candidate_images[0]))
-    
-    print("known_face_names", known_face_names)
 
     face_names, face_percentages = name_labeling(lost_img)
 
     for name, percentage in zip(face_names, face_percentages):
         dog_id = int(name)
-        if (percentage) >= upper_bound:
-            results.append((dog_id, percentage, "Face"))
+        if(percentage+20)<100:
+            if (percentage+20) >= upper_bound:
+                results.append((dog_id, percentage, "Face"))
 
     return results
 
 # face_recognition이 강아지 얼굴을 인식하도록 하는 함수
+
 def _trim_css_to_bounds(css, image_shape):
     return max(css[0], 0), min(css[1], image_shape[1]), min(css[2], image_shape[0]), max(css[3], 0)
 
