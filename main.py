@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from ultralytics import YOLO
 from ultralytics.engine.results import Results
 from imgaug import augmenters as iaa
+import tensorflow as tf
 from tensorflow.keras.models import load_model
 
 # 아마 서버에 dlib가 깔려야 할꺼에요...
@@ -22,10 +23,15 @@ import imutils
 from imutils import face_utils
 import face_recognition
 
+import requests
+from PIL import Image
+from io import BytesIO
+
 model = YOLO("./runs/detect/train2/weights/best.pt")
 
 # 비문 인식 모델 로드
-model_nose = load_model('./models/original.h5')
+model_nose = tf.saved_model.load('./Nose/saved_model')
+print("비문 인식 로드 완료")
 
 # 안면 인식 모델 로드
 detector = dlib.cnn_face_detection_model_v1('./models/dlibModels/dogHeadDetector.dat')
@@ -59,6 +65,7 @@ AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
 AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
 AWS_REGION_NAME = os.getenv('AWS_REGION_NAME')
 AWS_BUCKET_NAME = os.getenv('AWS_BUCKET_NAME')
+
 s3 = boto3.resource('s3',
                     aws_access_key_id=AWS_ACCESS_KEY_ID,
                     aws_secret_access_key= AWS_SECRET_ACCESS_KEY,
@@ -66,9 +73,15 @@ s3 = boto3.resource('s3',
 BUCKET = s3.Bucket(AWS_BUCKET_NAME)
 
 
-def s3_load_image(img_url):
-  return BUCKET.Object(img_url).get()['Body']
+# def s3_load_image(img_url):
+#   return BUCKET.Object(img_url).get()['Body']
 
+def s3_load_image(s3_url):
+    response = requests.get(s3_url)
+    if response.status_code == 200:
+        return BytesIO(response.content)
+    else:
+        raise Exception(f"Failed to load image. Status code: {response.status_code}")
 
 @app.post("/ai/analyse")
 def analyse(find_info: Info):
@@ -79,10 +92,13 @@ def analyse(find_info: Info):
     upper_bound = find_info.upperBound
 
     lost_img = s3_load_image(lost_dog["s3Url"])
-    lost_img = Image.open(lost_img)
+    # lost_img = Image.open(lost_img)
+    lost_img = np.array(Image.open(lost_img).convert('RGB'))
+    
     # lost_img.show()
     # candidate_images = [Image.open(s3_load_image(dog["s3Url"])) for dog in dog_candidates]
-    candidate_images = [(dog.dogId, Image.open(s3_load_image(dog.s3Url))) for dog in dog_candidates]
+    # candidate_images = [(dog['dogId'], Image.open(s3_load_image(dog['s3Url']))) for dog in dog_candidates]
+    candidate_images = [(dog['dogId'], np.array(Image.open(s3_load_image(dog['s3Url'])).convert('RGB'))) for dog in dog_candidates]
     
     ai_results = []
     
@@ -91,9 +107,12 @@ def analyse(find_info: Info):
     pred = model([img for _, img in candidate_images])
 
     for idx, temp in enumerate(pred):
-        dog_id = dog_candidates[idx].dogId
+        # dog_id = dog_candidates[idx].dogId
+        dog_id = dog_candidates[idx]['dogId']
+        detection_result = None
         # cropped_image = crop_nose(candidate_images[idx][1], temp)
-        if temp.boxes.conf > 0.7:
+        # if temp.boxes.conf > 0.7:
+        if temp.boxes and len(temp.boxes.conf) > 0 and temp.boxes.conf[0] > 0.7:
             # 개 코 인지 되면 비문 인식 AI 적용
             # nose_detection(cropped_image)
             cropped_image = crop_nose(candidate_images[idx][1], temp)
@@ -102,7 +121,7 @@ def analyse(find_info: Info):
         else:
             # 개 코 인지 안됐으므로 안면 인식 AI 적용
             # face_detection(cropped_image)
-            detection_results = face_detection(lost_img, candidate_images, upper_bound)
+            detection_results = face_detection(lost_img, candidate_images[idx], upper_bound)
             for result in detection_results:
                 ai_results.append({
                     "dogId": result[0],
@@ -163,20 +182,20 @@ def face_detection(lost_img, candidate_images, upper_bound):
     known_face_names.clear()
     results = []
 
-    for dog_id, img in candidate_images:
-        add_known_face(img, str(dog_id))
+    add_known_face(candidate_images[1], str(candidate_images[0]))
+    
+    print("known_face_names", known_face_names)
 
     face_names, face_percentages = name_labeling(lost_img)
 
     for name, percentage in zip(face_names, face_percentages):
         dog_id = int(name)
-        if (percentage + 30) >= upper_bound:
-            results.append((dog_id, percentage + 30, "Face"))
+        if (percentage) >= upper_bound:
+            results.append((dog_id, percentage, "Face"))
 
     return results
 
 # face_recognition이 강아지 얼굴을 인식하도록 하는 함수
-
 def _trim_css_to_bounds(css, image_shape):
     return max(css[0], 0), min(css[1], image_shape[1]), min(css[2], image_shape[0]), max(css[3], 0)
 
@@ -222,9 +241,9 @@ def name_labeling(input_image, size=None):
         if matches[best_match_index]:
             name = known_face_names[best_match_index]
 
-        percentage = (1 - face_distances[best_match_index]) * 100
-        face_names.append(name)
-        face_percentages.append(percentage)
+            percentage = (1 - face_distances[best_match_index]) * 100
+            face_names.append(name)
+            face_percentages.append(percentage)
 
     return face_names, face_percentages
 
